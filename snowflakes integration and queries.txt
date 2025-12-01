@@ -1,0 +1,158 @@
+-- connect as $SNOWFLAKE_USER and role with CREATE STAGE privileges
+USE WAREHOUSE IDENTIFIER $SNOWFLAKE_WAREHOUSE;
+CREATE DATABASE IF NOT EXISTS IDENTIFIER($SNOWFLAKE_DATABASE);
+USE DATABASE IDENTIFIER($SNOWFLAKE_DATABASE);
+CREATE SCHEMA IF NOT EXISTS IDENTIFIER($SNOWFLAKE_SCHEMA);
+USE SCHEMA IDENTIFIER($SNOWFLAKE_SCHEMA);
+
+-- Create tables
+CREATE OR REPLACE TABLE tracks (
+  track_id VARCHAR,
+  track_name VARCHAR,
+  popularity NUMBER,
+  album_id VARCHAR,
+  artist_id VARCHAR
+);
+
+CREATE OR REPLACE TABLE albums (
+  album_id VARCHAR,
+  album_name VARCHAR,
+  release_date DATE
+);
+
+CREATE OR REPLACE TABLE artists (
+  artist_id VARCHAR,
+  artist_name VARCHAR
+);
+
+-- File format (JSON records are arrays of objects for transformed files; our transformed file writes arrays)
+CREATE OR REPLACE FILE FORMAT spotify_json_format
+  TYPE = 'JSON'
+  STRIP_OUTER_ARRAY = TRUE;
+
+-- Stage using AWS keys (demo)
+CREATE OR REPLACE STAGE spotify_s3_stage
+  URL='s3://'$S3_BUCKET'/transformed_data'
+  CREDENTIALS=(AWS_KEY_ID='YOUR_AWS_ACCESS_KEY' AWS_SECRET_KEY='YOUR_AWS_SECRET_KEY')
+  FILE_FORMAT = spotify_json_format;
+
+
+
+
+
+
+-- load tracks.json into tracks table
+COPY INTO tracks FROM @spotify_s3_stage/tracks.json FILES = ('tracks.json');
+
+COPY INTO albums FROM @spotify_s3_stage/albums.json FILES = ('albums.json');
+
+COPY INTO artists FROM @spotify_s3_stage/artists.json FILES = ('artists.json');
+
+
+
+
+
+
+CREATE STORAGE INTEGRATION spotify_s3_integration
+  TYPE = EXTERNAL_STAGE
+  STORAGE_PROVIDER = S3
+  ENABLED = TRUE
+  STORAGE_AWS_ROLE_ARN = '' /* optional: leave blank for Snowflake to supply */
+  STORAGE_ALLOWED_LOCATIONS = ('s3://' || '<your-bucket-name>' || '/transformed_data/');
+
+-- now retrieve the integration details (this returns the EXTERNAL_ID & AWS_ARN to set up the role in AWS)
+DESC INTEGRATION spotify_s3_integration;
+
+
+
+
+
+
+
+
+
+ALTER STORAGE INTEGRATION spotify_s3_integration SET STORAGE_AWS_IAM_USER_ARN='<role-arn-from-aws>';
+-- Validate integration
+SELECT SYSTEM$VERIFY_STORAGE_INTEGRATION('spotify_s3_integration');
+
+
+
+
+
+
+
+
+
+CREATE OR REPLACE STAGE spotify_ext_stage
+  URL='s3://'$S3_BUCKET'/transformed_data/'
+  STORAGE_INTEGRATION = spotify_s3_integration
+  FILE_FORMAT = spotify_json_format;
+
+
+
+
+CREATE OR REPLACE PIPE spotify_pipe
+  AUTO_INGEST = TRUE
+  AS
+  COPY INTO tracks
+  FROM @spotify_ext_stage/tracks.json
+  FILE_FORMAT = (FORMAT_NAME = spotify_json_format)
+  ON_ERROR = 'CONTINUE';
+
+
+
+
+
+
+query
+
+SELECT track_name, popularity
+FROM tracks
+ORDER BY popularity DESC
+LIMIT 10;
+
+
+
+
+
+SELECT a.artist_name, AVG(t.popularity) AS avg_popularity, COUNT(*) AS tracks_count
+FROM tracks t
+JOIN artists a ON t.artist_id = a.artist_id
+GROUP BY a.artist_name
+HAVING COUNT(*) >= 3
+ORDER BY avg_popularity DESC
+LIMIT 20;
+
+
+
+
+
+SELECT DATE_TRUNC('month', a.release_date) AS release_month, COUNT(DISTINCT a.album_id) AS albums_count
+FROM albums a
+GROUP BY release_month
+ORDER BY release_month;
+
+
+
+SELECT t.track_name, t.popularity
+FROM tracks t
+JOIN artists a ON t.artist_id = a.artist_id
+WHERE a.artist_name = 'Artist Name'
+ORDER BY t.popularity DESC;
+
+
+
+
+
+CREATE OR REPLACE VIEW v_tracks_enriched AS
+SELECT t.track_id, t.track_name, t.popularity, a.album_name, a.release_date, ar.artist_name
+FROM tracks t
+LEFT JOIN albums a ON t.album_id = a.album_id
+LEFT JOIN artists ar ON t.artist_id = ar.artist_id;
+
+
+
+
+
+
+
